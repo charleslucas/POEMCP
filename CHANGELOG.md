@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-25
+
+### Fixed
+- **YouTube fetch reliability** — pin to reliable player clients and surface partial output on
+  timeout instead of failing outright (`fetch_youtube_transcript` / `fetch_youtube_description`).
+
 ## [0.3.0] - 2026-07-11
 
 ### Added
