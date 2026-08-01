@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`fetch_wiki_page` returned "Could not find wiki content on this page" for every URL.**
+  poewiki now fronts its article HTML with an anti-bot proof-of-work interstitial, which
+  returns HTTP 200 with a "Making sure you're not a bot!" document and no article markup —
+  so the `div.mw-parser-output` lookup always failed. Two changes: fetch through the
+  **MediaWiki API** (`action=parse&prop=text`, following redirects) instead of scraping the
+  page, and send an **honest identifying User-Agent** rather than the shared spoofed-browser
+  one — the anti-bot layer challenges browser-like clients while serving descriptive tool
+  UAs normally, and this also matches MediaWiki API etiquette. Missing pages now report the
+  API's error instead of a generic failure.
+
 ## [0.3.1] - 2026-07-25
 
 ### Fixed

@@ -1,9 +1,31 @@
 import re
+from urllib.parse import unquote, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 
 from poe_data_mcp.sources.common import HEADERS
+
+# poewiki's article HTML sits behind an anti-bot challenge; its MediaWiki API does not.
+_WIKI_API = "https://www.poewiki.net/w/api.php"
+
+# Identify honestly. The shared HEADERS spoof a browser User-Agent, which is exactly what
+# poewiki's anti-bot layer challenges with proof-of-work — a spoofed browser UA gets a
+# "Making sure you're not a bot!" page, while a descriptive tool UA is served normally.
+# This also matches MediaWiki API etiquette (identify your client, provide contact info).
+_WIKI_HEADERS = {
+    "User-Agent": "poe-data-mcp/0.3 (+https://github.com/charleslucas/poe-data-mcp) python-httpx",
+    "Accept": "application/json",
+}
+
+
+def _page_title_from_url(wiki_url: str) -> str | None:
+    """Extract the MediaWiki page title from a poewiki.net URL."""
+    path = urlparse(wiki_url).path
+    if "/wiki/" not in path:
+        return None
+    title = path.split("/wiki/", 1)[1].split("#", 1)[0].strip("/")
+    return unquote(title).replace("_", " ") or None
 
 # Sections worth extracting from poewiki.net pages
 _USEFUL_SECTIONS = {
@@ -77,16 +99,51 @@ def fetch_wiki_page(wiki_url: str) -> str:
     if "poewiki.net" not in wiki_url:
         return "This tool only works with poewiki.net URLs."
 
+    title_hint = _page_title_from_url(wiki_url)
+    if not title_hint:
+        return f"Could not parse a page title from {wiki_url!r} (expected .../wiki/Page_Name)."
+
+    # poewiki serves its ARTICLE HTML behind an anti-bot proof-of-work interstitial, so
+    # requesting the page directly returns HTTP 200 with a "Making sure you're not a bot!"
+    # document and no article markup. The MediaWiki API is not gated the same way, so parse
+    # through it and hand the rendered HTML to the same extraction logic as before.
     try:
-        resp = httpx.get(wiki_url, headers=HEADERS, follow_redirects=True, timeout=30)
+        resp = httpx.get(
+            _WIKI_API,
+            params={
+                "action": "parse",
+                "page": title_hint,
+                "prop": "text",
+                "format": "json",
+                "formatversion": "2",
+                "redirects": "1",
+            },
+            headers=_WIKI_HEADERS,
+            follow_redirects=True,
+            timeout=30,
+        )
         resp.raise_for_status()
+        payload = resp.json()
     except httpx.HTTPStatusError as e:
         return f"Failed to fetch wiki page (HTTP {e.response.status_code})."
+    except ValueError:
+        return (
+            "The wiki returned a non-JSON response — poewiki may be serving an anti-bot "
+            "challenge. Try again shortly, or read the page in a browser."
+        )
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    content = soup.select_one("div.mw-parser-output")
-    if not content:
-        return "Could not find wiki content on this page."
+    if isinstance(payload, dict) and "error" in payload:
+        info = payload["error"].get("info", "unknown error")
+        return f'Wiki API error for "{title_hint}": {info}'
+
+    parsed = (payload or {}).get("parse") or {}
+    page_html = parsed.get("text") or ""
+    if not page_html:
+        return f'No wiki content returned for "{title_hint}".'
+
+    soup = BeautifulSoup(page_html, "html.parser")
+    content = soup.select_one("div.mw-parser-output") or soup
+    api_title = parsed.get("title")
 
     # Strip inline tooltip popups (keep only the visible activator text)
     for popup in content.select(".hoverbox__display"):
@@ -94,9 +151,9 @@ def fetch_wiki_page(wiki_url: str) -> str:
 
     sections = []
 
-    # Page title
-    title_el = soup.select_one("h1#firstHeading, h1.firstHeading")
-    title = title_el.get_text(strip=True) if title_el else wiki_url.split("/")[-1].replace("_", " ")
+    # Page title — the API response carries no <h1>, so prefer the title it reports
+    # (which also reflects any redirect that was followed).
+    title = api_title or title_hint
     sections.append(f"# {title}")
     sections.append("")
 
