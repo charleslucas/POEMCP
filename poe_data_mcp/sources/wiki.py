@@ -184,3 +184,58 @@ def fetch_wiki_page(wiki_url: str) -> str:
 
     sections.append(f"**Source:** {wiki_url}")
     return "\n".join(sections)
+
+
+def wiki_cargo_query(tables: str, fields: str, where: str = "", limit: int = 50, offset: int = 0) -> str:
+    """Query poewiki Cargo tables directly — database-style access to item/mod data
+    instead of fetching wiki pages one at a time.
+
+    Answers "list ALL X with their properties" in one call: every currency item with
+    descriptions, uniques by base, mods by domain. Found 2026-08-05 enumerating the
+    3.29 Astrolabe varieties, which exist in no offline data source.
+
+    Args:
+        tables: Cargo table(s). Most useful: "items" (name, class, description,
+            drop_text, base_item, required_level), "mods" (id, name, domain,
+            generation_type, stat_text), "skill_gems". See Special:CargoTables.
+        fields: Table-qualified, comma-separated: "items.name,items.class".
+        where: SQL-ish filter, e.g. items.class="Currency Item" or
+            items.name LIKE "%Astrolabe%". Strongly recommended.
+        limit: 1-500 rows (default 50).  offset: pagination for larger sets.
+
+    Returns a count line then one " | "-joined row per line.
+    Wiki lags new leagues days-to-weeks: empty result != nonexistent in game.
+    Etiquette: honest UA, cache results locally, keep queries modest.
+    """
+    import httpx
+
+    params = {
+        "action": "cargoquery",
+        "tables": tables,
+        "fields": fields,
+        "limit": max(1, min(int(limit), 500)),
+        "offset": max(0, int(offset)),
+        "format": "json",
+    }
+    if where:
+        params["where"] = where
+    try:
+        resp = httpx.get(_WIKI_API, params=params, headers=_WIKI_HEADERS,
+                         timeout=30, follow_redirects=True)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:  # noqa: BLE001
+        return "Cargo query failed: {} — tables={} where={}".format(e, tables, where)
+    if "error" in data:
+        info = data["error"].get("info", str(data["error"]))
+        return "Cargo API error: {} (check names at Special:CargoTables)".format(info)
+    rows = data.get("cargoquery", [])
+    if not rows:
+        return ("0 rows. NOTE: empty != nonexistent in game — the wiki lags new leagues. "
+                "Verify table/field spelling (Special:CargoTables); try a LIKE filter.")
+    field_names = [f.split(".")[-1].strip() for f in fields.split(",")]
+    out = ["{} row(s) (limit {}, offset {}):".format(len(rows), params["limit"], params["offset"])]
+    for r in rows:
+        t = r.get("title", {})
+        out.append(" | ".join(str(t.get(fn, "") or "-") for fn in field_names))
+    return chr(10).join(out)
