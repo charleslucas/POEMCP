@@ -37,6 +37,34 @@ _YTDLP_MISSING = (
 # non-fatally by yt-dlp, so this stays safe across version bumps.
 _YT_EXTRACTOR_ARGS = ["--extractor-args", "youtube:player_client=default,android_vr,tv"]
 
+# Windows: never let a child attach to this server's console.
+#
+# Diagnosed 2026-08-09 after every yt-dlp call timed out while the identical command
+# ran fine from any shell. The child process WAS created, but sat at 0s CPU with its
+# loader threads waiting on EventPairLow — the LPC handshake with the console host —
+# until the timeout killed it, leaking a frozen process per attempt. Cause: the
+# harness launches this server with a console whose conhost.exe never finishes
+# initializing (2 threads, ~0.01s CPU, alive but inert), so any child inheriting that
+# console blocks forever attaching to it. Nothing to do with YouTube, yt-dlp's
+# version, or network.
+#
+# CREATE_NO_WINDOW gives the child its own (windowless) console instead of the
+# parent's broken one. stdin=DEVNULL is matching hygiene: a server's stdin is the MCP
+# pipe and no child of ours should ever read it.
+_NO_CONSOLE_FLAGS = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+
+
+def _run(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
+    """Run a child process detached from this server's console. See above."""
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        stdin=subprocess.DEVNULL,
+        creationflags=_NO_CONSOLE_FLAGS,
+    )
+
 
 def _tail(text: str | None, n: int = 12) -> str:
     """Last ``n`` non-blank lines of some captured output, for diagnostics."""
@@ -89,15 +117,13 @@ def fetch_youtube_description(url: str) -> str:
         return _YTDLP_MISSING
 
     try:
-        title_result = subprocess.run(
+        title_result = _run(
             [*ytdlp, "--get-title", "--force-ipv4", "--socket-timeout", "20",
-             "--no-warnings", *_YT_EXTRACTOR_ARGS, url],
-            capture_output=True, text=True, timeout=30
+             "--no-warnings", *_YT_EXTRACTOR_ARGS, url], timeout=30
         )
-        desc_result = subprocess.run(
+        desc_result = _run(
             [*ytdlp, "--get-description", "--force-ipv4", "--socket-timeout", "20",
-             "--no-warnings", *_YT_EXTRACTOR_ARGS, url],
-            capture_output=True, text=True, timeout=30
+             "--no-warnings", *_YT_EXTRACTOR_ARGS, url], timeout=30
         )
     except subprocess.TimeoutExpired as e:
         return _timeout_message("description", url, e)
@@ -157,15 +183,13 @@ def fetch_youtube_transcript(url: str, include_timestamps: bool = False) -> str:
 
     # Get title and chapter list from description first (lightweight)
     try:
-        title_result = subprocess.run(
+        title_result = _run(
             [*ytdlp, "--get-title", "--force-ipv4", "--socket-timeout", "20",
-             "--no-warnings", *_YT_EXTRACTOR_ARGS, url],
-            capture_output=True, text=True, timeout=15
+             "--no-warnings", *_YT_EXTRACTOR_ARGS, url], timeout=15
         )
-        desc_result = subprocess.run(
+        desc_result = _run(
             [*ytdlp, "--get-description", "--force-ipv4", "--socket-timeout", "20",
-             "--no-warnings", *_YT_EXTRACTOR_ARGS, url],
-            capture_output=True, text=True, timeout=15
+             "--no-warnings", *_YT_EXTRACTOR_ARGS, url], timeout=15
         )
         title = title_result.stdout.strip()
         description = desc_result.stdout.strip()
@@ -184,12 +208,11 @@ def fetch_youtube_transcript(url: str, include_timestamps: bool = False) -> str:
         # yt-dlp's defaults (no socket timeout, 10 retries) can hang past the
         # wrapper timeout on an intermittently stalled timedtext download.
         try:
-            result = subprocess.run(
+            result = _run(
                 [*ytdlp, "--write-auto-subs", "--sub-lang", "en",
                  "--sub-format", "json3", "--skip-download", "--no-warnings",
                  "--force-ipv4", "--socket-timeout", "20", "--retries", "3",
-                 *_YT_EXTRACTOR_ARGS, "-o", out_path, url],
-                capture_output=True, text=True, timeout=120
+                 *_YT_EXTRACTOR_ARGS, "-o", out_path, url], timeout=120
             )
         except subprocess.TimeoutExpired as e:
             return _timeout_message("transcript", url, e)
